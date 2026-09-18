@@ -479,7 +479,7 @@ FMT_CONSTEXPR20 inline auto reserve(OutputIt it, size_t n) ->
 }
 
 template <typename T>
-FMT_CONSTEXPR20 inline auto reserve(basic_appender<T> it, size_t n)
+FMT_CONSTEXPR inline auto reserve(basic_appender<T> it, size_t n)
     -> basic_appender<T> {
   buffer<T>& buf = get_container(it);
   buf.try_reserve(buf.size() + n);
@@ -554,6 +554,9 @@ FMT_CONSTEXPR auto fill_n(basic_appender<T> out, size_t n, T value)
     buf.try_reserve(buf.size() + n);
     auto size = buf.size();
     auto count = min_of(n, buf.capacity() - size);
+    // Unbuffered output forwards writes instead of providing storage.
+    if (count == 0)
+      return fill_n<basic_appender<T>, size_t, T>(out, n, value);
     buf.try_resize(size + count);
     detail::fill_n(buf.data() + size, count, value);
     n -= count;
@@ -3887,8 +3890,11 @@ FMT_CONSTEXPR auto write(OutputIt out, const T& value) -> OutputIt {
   auto f = formatter<T, Char>();
   auto parse_ctx = parse_context<Char>({});
   f.parse(parse_ctx);
-  auto ctx = basic_format_context<OutputIt, Char>(out, {}, {});
-  return f.format(value, ctx);
+  auto adapter = iterator_adapter<OutputIt, Char>(out);
+  auto&& buf = adapter.get_buffer();
+  auto ctx = buffered_context<Char>(basic_appender<Char>(buf), {}, {});
+  f.format(value, ctx);
+  return get_iterator(buf, out);
 }
 
 template <typename T>
@@ -4158,7 +4164,7 @@ template <typename OutputIt, typename Char> class generic_context {
   constexpr auto arg_id(basic_string_view<Char> name) const -> int {
     return args_.get_id(name);
   }
-  auto args() const -> const basic_format_args<generic_context>& {
+  constexpr auto args() const -> const basic_format_args<generic_context>& {
     return args_;
   }
 
