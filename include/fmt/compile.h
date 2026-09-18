@@ -231,10 +231,12 @@ template <typename Char, typename V, int N> struct spec_field {
   template <typename OutputIt, typename... T>
   constexpr FMT_INLINE auto format(OutputIt out, const T&... args) const
       -> OutputIt {
-    const auto& vargs =
-        fmt::make_format_args<basic_format_context<OutputIt, Char>>(args...);
-    basic_format_context<OutputIt, Char> ctx(out, vargs);
-    return fmt.format(get_arg_checked<V, N>(args...), ctx);
+    const auto& vargs = fmt::make_format_args<buffered_context<Char>>(args...);
+    auto adapter = iterator_adapter<OutputIt, Char>(out);
+    auto&& buf = adapter.get_buffer();
+    auto ctx = buffered_context<Char>(basic_appender<Char>(buf), vargs);
+    fmt.format(get_arg_checked<V, N>(args...), ctx);
+    return get_iterator(buf, out);
   }
 };
 

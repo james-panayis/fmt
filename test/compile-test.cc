@@ -17,6 +17,7 @@
 #include "fmt/color.h"
 #include "fmt/ranges.h"
 #include "fmt/std.h"
+#include "fmt/xchar.h"
 #include "gmock/gmock.h"
 #include "gtest-extra.h"
 
@@ -170,6 +171,48 @@ TEST(compile_test, named) {
 #  endif
 }
 
+TEST(compile_test, range) {
+  std::array<int, 3> values{{1, 2, 3}};
+  EXPECT_EQ("[1, 2, 3]", fmt::format(FMT_COMPILE("{:}"), values));
+  EXPECT_EQ("42: [1, 2, 3]", fmt::format(FMT_COMPILE("{:d}: {}"), 42, values));
+}
+
+TEST(compile_test, range_dynamic_specs) {
+  std::array<double, 2> values{{1.25, 2.5}};
+  EXPECT_EQ("****[1.25, 2.50]",
+            fmt::format(FMT_COMPILE("{:*>{}:.{}f}"), values, 16, 2));
+  // Name only the specs so this does not fall back to runtime formatting.
+  EXPECT_EQ(L"****[1.25, 2.50]",
+            fmt::format(FMT_COMPILE(L"{0:*>{width}:.{precision}f}"), values,
+                        fmt::arg(L"width", 16), fmt::arg(L"precision", 2)));
+}
+
+struct custom_arg_ref {};
+
+FMT_BEGIN_NAMESPACE
+template <> struct formatter<custom_arg_ref> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+
+  auto format(custom_arg_ref, format_context& ctx) const
+      -> decltype(ctx.out()) {
+    // Format argument 1 with a width taken from argument 2.
+    auto parse_ctx = format_parse_context("{2}}");
+    ctx.arg(1).visit([&](auto arg) {
+      using handle = basic_format_arg<format_context>::handle;
+      if constexpr (std::is_same_v<decltype(arg), handle>)
+        arg.format(parse_ctx, ctx);
+    });
+    return ctx.out();
+  }
+};
+FMT_END_NAMESPACE
+
+TEST(compile_test, range_custom_arg) {
+  std::array<custom_arg_ref, 1> refs{};
+  EXPECT_EQ("***[  42]",
+            fmt::format(FMT_COMPILE("{:*>9}"), refs, type_with_get(), 4));
+}
+
 TEST(compile_test, join) {
   unsigned char data[] = {0x1, 0x2, 0xaf};
   EXPECT_EQ("0102af", fmt::format(FMT_COMPILE("{:02x}"), fmt::join(data, "")));
@@ -209,6 +252,14 @@ TEST(compile_test, output_iterators) {
   fmt::format_to(std::ostreambuf_iterator<char>(s2), FMT_COMPILE("{}.{:06d}"),
                  42, 43);
   EXPECT_EQ("42.000043", s2.str());
+}
+
+TEST(compile_test, range_output_iterators) {
+  std::array<int, 1> values{{42}};
+  char buffer[10];
+  auto end = fmt::format_to(buffer, FMT_COMPILE("{}|{:}"), values, values);
+  ASSERT_EQ(buffer + 9, end);
+  EXPECT_EQ("[42]|[42]", std::string(buffer, end));
 }
 
 #  if FMT_USE_CONSTEVAL && (!FMT_MSC_VERSION || FMT_MSC_VERSION >= 1940)
@@ -428,6 +479,12 @@ TEST(compile_time_formatting_test, combination) {
 TEST(compile_time_formatting_test, custom_type) {
   EXPECT_EQ("foo", test_format<4>(FMT_COMPILE("{}"), test_formattable()));
   EXPECT_EQ("bar", test_format<4>(FMT_COMPILE("{:b}"), test_formattable()));
+}
+
+TEST(compile_time_formatting_test, range) {
+  constexpr std::array<int, 3> values{{1, 2, 3}};
+  EXPECT_EQ("***[1, 2, 3]",
+            test_format<13>(FMT_COMPILE("{:*>{}}"), values, 12));
 }
 
 TEST(compile_time_formatting_test, multibyte_fill) {

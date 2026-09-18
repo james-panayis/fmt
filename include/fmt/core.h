@@ -1754,8 +1754,10 @@ class format_string_checker {
   }
 };
 
-/// A contiguous memory buffer with an optional growing ability. It is an
-/// internal class and shouldn't be used directly, only via `memory_buffer`.
+template <typename T> struct unbuffered_buffer;
+
+/// An output buffer with optional storage and growth. It is an internal class
+/// and shouldn't be used directly, only via `memory_buffer`.
 template <typename T> class buffer {
  private:
   T* ptr_;
@@ -1763,7 +1765,22 @@ template <typename T> class buffer {
   size_t capacity_;
 
   using grow_fun = void (*)(buffer& buf, size_t capacity);
+  // Null for unbuffered_buffer<T>, which causes writes to be forwarded.
   grow_fun grow_;
+
+  // GCC can diagnose this downcast in unreachable small-buffer branches.
+  FMT_PRAGMA_GCC(diagnostic push)
+  FMT_PRAGMA_GCC(diagnostic ignored "-Warray-bounds")
+  FMT_CONSTEXPR void append_unbuffered(const T& value, size_t count) {
+    auto& self = static_cast<unbuffered_buffer<T>&>(*this);
+    self.write(self.state, value, count);
+  }
+  FMT_PRAGMA_GCC(diagnostic pop)
+  template <typename U>
+  FMT_CONSTEXPR void append_unbuffered(const U& value, size_t count) {
+    for (size_t i = 0; i < count; ++i)
+      append_unbuffered(static_cast<T>((&value)[i]), 1);
+  }
 
  protected:
   // Don't initialize ptr_ since it is not accessed to save a few cycles.
@@ -1821,25 +1838,29 @@ template <typename T> class buffer {
   // Tries increasing the buffer capacity to `new_capacity`. It can increase the
   // capacity by a smaller amount than requested but guarantees there is space
   // for at least one additional element either by increasing the capacity or by
-  // flushing the buffer if it is full.
+  // flushing the buffer if it is full. Does nothing for unbuffered output.
   FMT_CONSTEXPR void try_reserve(size_t new_capacity) {
-    if (new_capacity > capacity_) grow_(*this, new_capacity);
+    if (new_capacity > capacity_ && grow_) grow_(*this, new_capacity);
   }
 
   FMT_CONSTEXPR void push_back(const T& value) {
-    try_reserve(size_ + 1);
+    if (size_ == capacity_) {
+      if (!grow_) return append_unbuffered(value, 1);
+      grow_(*this, size_ + 1);
+    }
     ptr_[size_++] = value;
   }
 
   /// Appends data to the end of the buffer.
   template <typename U>
-  FMT_CONSTEXPR20 void append(const U* begin, const U* end) {
+  FMT_CONSTEXPR void append(const U* begin, const U* end) {
     static_assert(std::is_same<T, U>() || std::is_same<U, char>(), "");
     while (begin != end) {
       auto size = size_;
       auto free_cap = capacity_ - size;
       auto count = to_unsigned(end - begin);
       if (free_cap < count) {
+        if (!grow_) return append_unbuffered(*begin, count);
         grow_(*this, size + count);
         size = size_;
         free_cap = capacity_ - size;
@@ -1860,6 +1881,18 @@ template <typename T> class buffer {
   constexpr auto operator[](Idx index) const -> const T& {
     return ptr_[index];
   }
+};
+
+struct iterator_state {};
+
+// No owned storage or destructor is needed for C++17 constant evaluation.
+template <typename T> struct unbuffered_buffer : buffer<T> {
+  using write_func = void (*)(iterator_state&, const T&, size_t);
+  write_func write;
+  iterator_state& state;
+
+  constexpr unbuffered_buffer(iterator_state& s, write_func f)
+      : buffer<T>(nullptr), write(f), state(s) {}
 };
 
 struct buffer_traits {
@@ -2018,10 +2051,10 @@ class iterator_buffer<T*, T, fixed_buffer_traits> : public fixed_buffer_traits,
 
 template <typename T> class iterator_buffer<T*, T> : public buffer<T> {
  public:
-  explicit iterator_buffer(T* out, size_t = 0)
+  FMT_CONSTEXPR explicit iterator_buffer(T* out, size_t = 0)
       : buffer<T>([](buffer<T>&, size_t) {}, out, 0, ~size_t()) {}
 
-  auto out() -> T* { return &*this->end(); }
+  FMT_CONSTEXPR auto out() -> T* { return this->data() + this->size(); }
 };
 
 template <typename Container>
@@ -2085,36 +2118,89 @@ template <typename T = char> class counting_buffer : public buffer<T> {
 template <typename T>
 struct is_back_insert_iterator<basic_appender<T>> : std::true_type {};
 
-template <typename It, typename Enable = std::true_type>
+template <typename It, typename T, typename Enable = std::true_type>
 struct is_buffer_appender : std::false_type {};
-template <typename It>
+template <typename It, typename T>
 struct is_buffer_appender<
-    It, bool_constant<
-            is_back_insert_iterator<It>::value &&
-            std::is_base_of<buffer<typename It::container_type::value_type>,
-                            typename It::container_type>::value>>
+    It, T,
+    bool_constant<
+        is_back_insert_iterator<It>::value &&
+        std::is_base_of<buffer<T>, typename It::container_type>::value>>
     : std::true_type {};
 
 // Maps an output iterator to a buffer.
 template <typename T, typename OutputIt,
-          FMT_ENABLE_IF(!is_buffer_appender<OutputIt>::value)>
-auto get_buffer(OutputIt out) -> iterator_buffer<OutputIt, T> {
+          FMT_ENABLE_IF(!is_buffer_appender<OutputIt, T>::value)>
+FMT_CONSTEXPR auto get_buffer(OutputIt out) -> iterator_buffer<OutputIt, T> {
   return iterator_buffer<OutputIt, T>(out);
 }
 template <typename T, typename OutputIt,
-          FMT_ENABLE_IF(is_buffer_appender<OutputIt>::value)>
-auto get_buffer(OutputIt out) -> buffer<T>& {
+          FMT_ENABLE_IF(is_buffer_appender<OutputIt, T>::value)>
+FMT_CONSTEXPR auto get_buffer(OutputIt out) -> buffer<T>& {
   return get_container(out);
 }
 
 template <typename Buf, typename OutputIt>
-auto get_iterator(Buf& buf, OutputIt) -> decltype(buf.out()) {
+FMT_CONSTEXPR auto get_iterator(Buf& buf, OutputIt) -> decltype(buf.out()) {
   return buf.out();
 }
 template <typename T, typename OutputIt>
-auto get_iterator(buffer<T>&, OutputIt out) -> OutputIt {
+FMT_CONSTEXPR auto get_iterator(buffer<T>&, OutputIt out) -> OutputIt {
   return out;
 }
+
+// Adapts an iterator to the buffer-based formatter interface without staging
+// output.
+template <typename OutputIt, typename T,
+          bool use_buffer = is_buffer_appender<OutputIt, T>::value ||
+                            std::is_same<OutputIt, T*>::value>
+class iterator_adapter : private iterator_state {
+ private:
+  OutputIt& out_;
+
+  template <typename It, FMT_ENABLE_IF(is_back_insert_iterator<It>::value)>
+  static auto get_value_type(int) -> typename It::container_type::value_type;
+  template <typename It>
+  static auto get_value_type(...)
+      -> remove_cvref_t<decltype(*std::declval<It&>())>;
+  using output_type = decltype(get_value_type<OutputIt>(0));
+  using value_type =
+      conditional_t<std::is_integral<output_type>::value, output_type, T>;
+
+  FMT_CONSTEXPR void copy_to(const T* begin, const T* end, std::true_type) {
+    out_ = copy<value_type>(begin, end, out_);
+  }
+  FMT_CONSTEXPR void copy_to(const T* begin, const T* end, std::false_type) {
+    // A buffer's bulk append need not support this character conversion.
+    while (begin != end) *out_++ = static_cast<value_type>(*begin++);
+  }
+
+  static FMT_CONSTEXPR void write(iterator_state& state, const T& value,
+                                  size_t count) {
+    auto& self = static_cast<iterator_adapter&>(state);
+    // Iterator assignment can be constexpr even when bulk append is not.
+    if (count == 1) {
+      *self.out_++ = static_cast<value_type>(value);
+      return;
+    }
+    auto begin = &value;
+    self.copy_to(begin, begin + count,
+                 bool_constant<std::is_same<T, output_type>::value ||
+                               std::is_same<T, char>::value>());
+  }
+
+ public:
+  constexpr explicit iterator_adapter(OutputIt& out) : out_(out) {}
+
+  template <bool B = use_buffer, FMT_ENABLE_IF(!B)>
+  FMT_CONSTEXPR auto get_buffer() -> unbuffered_buffer<T> {
+    return {*this, write};
+  }
+  template <bool B = use_buffer, FMT_ENABLE_IF(B)>
+  FMT_CONSTEXPR auto get_buffer() -> decltype(detail::get_buffer<T>(out_)) {
+    return detail::get_buffer<T>(out_);
+  }
+};
 
 // This type is intentionally undefined, only used for errors.
 template <typename T, typename Char> struct type_is_unformattable_for;
@@ -2668,7 +2754,7 @@ class context {
   FMT_CONSTEXPR auto arg_id(string_view name) const -> int {
     return args_.get_id(name);
   }
-  auto args() const -> const format_args& { return args_; }
+  constexpr auto args() const -> const format_args& { return args_; }
 
   // Returns an iterator to the beginning of the output range.
   constexpr auto out() const -> iterator { return out_; }
