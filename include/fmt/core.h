@@ -2161,11 +2161,25 @@ class iterator_adapter : private iterator_state {
   template <typename It, FMT_ENABLE_IF(is_back_insert_iterator<It>::value)>
   static auto get_value_type(int) -> typename It::container_type::value_type;
   template <typename It>
-  static auto get_value_type(...)
-      -> remove_cvref_t<decltype(*std::declval<It&>())>;
-  using output_type = decltype(get_value_type<OutputIt>(0));
-  using value_type =
-      conditional_t<std::is_integral<output_type>::value, output_type, T>;
+  static auto get_value_type(...) -> decltype(*std::declval<It&>());
+
+ public:
+  using output_type = remove_reference_t<decltype(get_value_type<OutputIt>(0))>;
+
+  constexpr explicit iterator_adapter(OutputIt& out) : out_(out) {}
+
+  template <bool B = use_buffer, FMT_ENABLE_IF(!B)>
+  FMT_CONSTEXPR auto get_buffer() -> unbuffered_buffer<T> {
+    return {*this, write};
+  }
+  template <bool B = use_buffer, FMT_ENABLE_IF(B)>
+  FMT_CONSTEXPR auto get_buffer() -> decltype(detail::get_buffer<T>(out_)) {
+    return detail::get_buffer<T>(out_);
+  }
+
+ private:
+  using value_type = conditional_t<std::is_integral<output_type>::value,
+                                   remove_cvref_t<output_type>, T>;
 
   FMT_CONSTEXPR void copy_to(const T* begin, const T* end, std::true_type) {
     out_ = copy<value_type>(begin, end, out_);
@@ -2187,18 +2201,6 @@ class iterator_adapter : private iterator_state {
     self.copy_to(begin, begin + count,
                  bool_constant<std::is_same<T, output_type>::value ||
                                std::is_same<T, char>::value>());
-  }
-
- public:
-  constexpr explicit iterator_adapter(OutputIt& out) : out_(out) {}
-
-  template <bool B = use_buffer, FMT_ENABLE_IF(!B)>
-  FMT_CONSTEXPR auto get_buffer() -> unbuffered_buffer<T> {
-    return {*this, write};
-  }
-  template <bool B = use_buffer, FMT_ENABLE_IF(B)>
-  FMT_CONSTEXPR auto get_buffer() -> decltype(detail::get_buffer<T>(out_)) {
-    return detail::get_buffer<T>(out_);
   }
 };
 
@@ -2451,6 +2453,17 @@ struct format_arg_store {
   type args;
 };
 
+// An inherited tag does not opt a custom formatter into the native path.
+template <typename F, typename = void>
+struct is_native_formatter : std::false_type {};
+template <typename F>
+struct is_native_formatter<F, void_t<typename F::fmt_native_formatter>>
+    : std::is_same<F, typename F::fmt_native_formatter> {};
+
+template <typename F, typename Base>
+using native_formatter_type =
+    conditional_t<is_native_formatter<Base>::value, F, void>;
+
 // TYPE can be different from type_constant<T>, e.g. for __float128.
 template <typename T, typename Char, type TYPE> struct native_formatter {
  private:
@@ -2463,6 +2476,8 @@ template <typename T, typename Char, type TYPE> struct native_formatter {
     if FMT_CONSTEXPR20 (TYPE == type::char_type) check_char_specs(specs_);
     return end;
   }
+
+  constexpr auto is_localized() const -> bool { return specs_.localized(); }
 
   template <type U = TYPE,
             FMT_ENABLE_IF(U == type::string_type || U == type::cstring_type ||
@@ -2847,6 +2862,7 @@ struct formatter<T, Char,
                  enable_if_t<detail::type_constant<T, Char>::value !=
                              detail::type::custom_type>>
     : detail::native_formatter<T, Char, detail::type_constant<T, Char>::value> {
+  using fmt_native_formatter = formatter;
 };
 
 /**

@@ -223,6 +223,19 @@ template <typename Char> struct runtime_named_field {
 template <typename Char>
 struct is_compiled_format<runtime_named_field<Char>> : std::true_type {};
 
+template <typename OutputIt, typename Char> struct native_context {
+  using char_type = Char;
+  OutputIt out_;
+  basic_format_args<buffered_context<Char>> args_;
+
+  constexpr auto out() const -> OutputIt { return out_; }
+  template <typename Id>
+  constexpr auto arg(Id id) const -> basic_format_arg<buffered_context<Char>> {
+    return args_.get(id);
+  }
+  constexpr auto locale() const -> locale_ref { return {}; }
+};
+
 // A replacement field that refers to argument N and has format specifiers.
 template <typename Char, typename V, int N> struct spec_field {
   using char_type = Char;
@@ -232,6 +245,16 @@ template <typename Char, typename V, int N> struct spec_field {
   constexpr FMT_INLINE auto format(OutputIt out, const T&... args) const
       -> OutputIt {
     const auto& vargs = fmt::make_format_args<buffered_context<Char>>(args...);
+    // Preserve the canonical context for buffered or converting iterators.
+    if constexpr (is_native_formatter<formatter<V, Char>>::value &&
+                  !std::is_same<OutputIt, basic_appender<Char>>::value &&
+                  std::is_same<Char, typename iterator_adapter<
+                                         OutputIt, Char>::output_type>::value) {
+      if (!fmt.is_localized()) {
+        auto ctx = native_context<OutputIt, Char>{out, vargs};
+        return fmt.format(get_arg_checked<V, N>(args...), ctx);
+      }
+    }
     auto adapter = iterator_adapter<OutputIt, Char>(out);
     auto&& buf = adapter.get_buffer();
     auto ctx = buffered_context<Char>(basic_appender<Char>(buf), vargs);

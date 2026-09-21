@@ -1886,7 +1886,15 @@ template <typename Char, typename OutputIt>
 FMT_CONSTEXPR FMT_NOINLINE auto fill(OutputIt it, size_t n,
                                      const basic_specs& specs) -> OutputIt {
   auto fill_size = specs.fill_size();
-  if (fill_size == 1) return detail::fill_n(it, n, specs.fill_unit<Char>());
+  if (fill_size == 1) {
+    if (!is_constant_evaluated(true)) {
+      if (auto ptr = to_pointer<Char>(it, n)) {
+        detail::fill_n(ptr, n, specs.fill_unit<Char>());
+        return it;
+      }
+    }
+    return detail::fill_n(it, n, specs.fill_unit<Char>());
+  }
   if (const Char* data = specs.fill<Char>()) {
     for (size_t i = 0; i < n; ++i) it = copy<Char>(data, data + fill_size, it);
   }
@@ -4202,14 +4210,16 @@ template <typename Locale> class format_facet : public Locale::facet {
   }
 };
 
-#define FMT_FORMAT_AS(Type, Base)                                   \
-  template <typename Char>                                          \
-  struct formatter<Type, Char> : formatter<Base, Char> {            \
-    template <typename FormatContext>                               \
-    FMT_CONSTEXPR auto format(Type value, FormatContext& ctx) const \
-        -> decltype(ctx.out()) {                                    \
-      return formatter<Base, Char>::format(value, ctx);             \
-    }                                                               \
+#define FMT_FORMAT_AS(Type, Base)                                        \
+  template <typename Char>                                               \
+  struct formatter<Type, Char> : formatter<Base, Char> {                 \
+    using fmt_native_formatter =                                         \
+        detail::native_formatter_type<formatter, formatter<Base, Char>>; \
+    template <typename FormatContext>                                    \
+    FMT_CONSTEXPR auto format(Type value, FormatContext& ctx) const      \
+        -> decltype(ctx.out()) {                                         \
+      return formatter<Base, Char>::format(value, ctx);                  \
+    }                                                                    \
   }
 
 FMT_FORMAT_AS(signed char, int);
@@ -4224,20 +4234,32 @@ FMT_FORMAT_AS(std::nullptr_t, const void*);
 FMT_FORMAT_AS(void*, const void*);
 
 template <typename Char, size_t N>
-struct formatter<Char[N], Char> : formatter<basic_string_view<Char>, Char> {};
+struct formatter<Char[N], Char> : formatter<basic_string_view<Char>, Char> {
+  using fmt_native_formatter =
+      detail::native_formatter_type<formatter,
+                                    formatter<basic_string_view<Char>, Char>>;
+};
 
 template <typename Char, typename Traits, typename Allocator>
-class formatter<std::basic_string<Char, Traits, Allocator>, Char>
-    : public formatter<basic_string_view<Char>, Char> {};
+struct formatter<std::basic_string<Char, Traits, Allocator>, Char>
+    : formatter<basic_string_view<Char>, Char> {
+  using fmt_native_formatter =
+      detail::native_formatter_type<formatter,
+                                    formatter<basic_string_view<Char>, Char>>;
+};
 
 template <typename Char>
 struct formatter<detail::float128, Char>
     : detail::native_formatter<detail::float128, Char,
-                               detail::type::float_type> {};
+                               detail::type::float_type> {
+  using fmt_native_formatter = formatter;
+};
 
 template <typename T, typename Char>
 struct formatter<T, Char, void_t<detail::format_as_result<T>>>
     : formatter<detail::format_as_result<T>, Char> {
+  using fmt_native_formatter = detail::native_formatter_type<
+      formatter, formatter<detail::format_as_result<T>, Char>>;
   template <typename FormatContext>
   FMT_CONSTEXPR auto format(const T& value, FormatContext& ctx) const
       -> decltype(ctx.out()) {
