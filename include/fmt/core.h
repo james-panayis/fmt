@@ -386,6 +386,10 @@ constexpr auto is_constant_evaluated(bool default_value = false) noexcept
 #elif defined(__cpp_lib_is_constant_evaluated)
   ignore_unused(default_value);
   return std::is_constant_evaluated();
+#elif FMT_CPLUSPLUS >= 201402L && FMT_USE_CONSTEXPR && \
+    FMT_HAS_BUILTIN(__builtin_is_constant_evaluated)
+  ignore_unused(default_value);
+  return __builtin_is_constant_evaluated();
 #else
   return default_value;
 #endif
