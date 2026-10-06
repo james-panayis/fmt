@@ -2182,11 +2182,15 @@ class iterator_adapter : private iterator_state {
   }
 
  private:
-  using value_type = conditional_t<std::is_integral<output_type>::value,
-                                   remove_cvref_t<output_type>, T>;
+  using preferred_type = conditional_t<std::is_integral<output_type>::value,
+                                       remove_cvref_t<output_type>, T>;
+  using value_type =
+      conditional_t<std::is_assignable<decltype(*std::declval<OutputIt&>()++),
+                                       preferred_type>::value,
+                    preferred_type, T>;
 
   FMT_CONSTEXPR void copy_to(const T* begin, const T* end, std::true_type) {
-    out_ = copy<value_type>(begin, end, out_);
+    out_ = detail::copy<value_type>(begin, end, out_);
   }
   FMT_CONSTEXPR void copy_to(const T* begin, const T* end, std::false_type) {
     // A buffer's bulk append need not support this character conversion.

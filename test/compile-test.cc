@@ -424,6 +424,31 @@ consteval auto test_format(auto format, const Args&... args) {
   return string;
 }
 
+struct byte_iterator {
+  using difference_type = std::ptrdiff_t;
+  unsigned char* p;
+  constexpr auto operator*() const -> unsigned char& { return *p; }
+  constexpr auto operator++() -> byte_iterator& { ++p; return *this; }
+  struct proxy {
+    unsigned char* p;
+    constexpr operator byte_iterator() const { return {p}; }
+    constexpr auto operator*() -> proxy& { return *this; }
+    constexpr void operator=(unsigned char c) { *p = c; }
+    void operator=(char c) { *p = static_cast<unsigned char>(c); }
+  };
+  constexpr auto operator++(int) -> proxy { return {p++}; }
+};
+
+TEST(compile_time_formatting_test, byte_iterator) {
+  constexpr auto result = [] {
+    unsigned char out[3]{};
+    auto it = fmt::format_to(byte_iterator{out}, FMT_COMPILE("{:}"), 7);
+    fmt::format_to(it, FMT_COMPILE("{:}"), 42);
+    return out[0] == '7' && out[1] == '4' && out[2] == '2';
+  }();
+  EXPECT_TRUE(result);
+}
+
 TEST(compile_time_formatting_test, bool) {
   EXPECT_EQ("true", test_format<5>(FMT_COMPILE("{}"), true));
   EXPECT_EQ("false", test_format<6>(FMT_COMPILE("{}"), false));
